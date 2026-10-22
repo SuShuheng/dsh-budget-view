@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-budget-view
+      name: dsh-budget-view
+      config: {}
