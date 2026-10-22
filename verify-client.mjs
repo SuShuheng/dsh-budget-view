@@ -5,15 +5,22 @@ import vm from 'node:vm';
 const source = await readFile(new URL('./client.js', import.meta.url), 'utf8');
 const instrumented = source.replace(
   "return { name: 'dsh-budget-view', inject, apply };",
-  "return { name: 'dsh-budget-view', inject, apply, __test: { sessionCost, costFromDays, isPeakAt, isCnHoliday, isWeekendKey, CN_HOLIDAYS, mergePricing, costDisplay } };",
+  "return { name: 'dsh-budget-view', inject, apply, __test: { sessionCost, costFromDays, isPeakAt, isCnHoliday, isWeekendKey, CN_HOLIDAYS, mergePricing, costDisplay, kindFor, normalizeSettings, publishSettings, BudgetPill, HeroBudget, zh, en } };",
 );
 
 let module;
+let budgetState = { data: null, error: false };
+const react = {
+  createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+  useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+  useState: () => [budgetState, () => {}],
+  useEffect: () => {},
+};
 const sandbox = {
   window: {
     __ModuleLoader__: {
       load({ factory }) {
-        module = factory(() => ({ createElement: () => null }));
+        module = factory(() => react);
       },
     },
   },
@@ -99,3 +106,60 @@ console.log('client checks passed:', {
   normalCost: normal.cny.toFixed(2),
   fallback: fallbackCost.source,
 });
+
+const { kindFor, normalizeSettings, publishSettings, BudgetPill, HeroBudget, zh, en } = module.__test;
+assert.equal(kindFor({ provider: 'opencode-go', model: 'deepseek-v4-pro' }), 'opencode-go');
+assert.equal(kindFor({ provider: 'opencode-go', model: 'kimi-k2.7' }), 'opencode-go');
+assert.equal(kindFor({ provider: 'openai-codex', model: 'gpt-5' }), 'codex');
+assert.equal(kindFor({ provider: 'deepseek-official', model: 'deepseek-flash' }), 'deepseek');
+assert.equal(normalizeSettings({ heroMode: 'opencode-go' }).heroMode, 'opencode-go');
+
+const quota = {
+  available: true,
+  fiveHour: { remainingPercent: 69, resetAt: '2026-10-22T10:00:00Z' },
+  weekly: { remainingPercent: 95, resetAt: '2026-10-29T10:00:00Z' },
+};
+const current = { provider: 'opencode-go', model: 'deepseek-v4-pro' };
+const props = {
+  rpc: {}, directory: { getSnapshot: () => ({ current, status: 'ready' }) },
+  load() {}, useProjection: () => null,
+};
+const textOf = node => typeof node === 'string' ? node : node?.children?.map(textOf).join('') || '';
+const find = (node, predicate) => node && typeof node === 'object'
+  ? predicate(node) ? node : node.children?.map(child => find(child, predicate)).find(Boolean)
+  : undefined;
+for (const messages of [zh, en]) {
+  props.t = (key, vars = {}) => (messages[key] || key).replace(/\{(\w+)\}/g, (_, name) => vars[name] ?? '');
+  publishSettings({ heroMode: 'current' });
+  budgetState = { data: { kind: 'opencode-go', opencodeGo: quota }, error: false };
+  const pill = BudgetPill(props);
+  assert.equal(pill.props['data-budget-kind'], 'opencode-go');
+  assert.match(textOf(pill), /OpenCode Go · 5h 69% · 7d 95%/);
+  assert.match(pill.props.title, /OpenCode Go/);
+  assert.ok(!pill.props.title.includes('Codex'));
+
+  for (const mode of ['both', 'current', 'opencode-go']) {
+    for (const style of ['chips', 'plain']) {
+      publishSettings({ heroMode: mode, heroStyle: style, showBalance: false });
+      budgetState = { data: mode === 'both'
+        ? { kind: 'summary', opencodeGo: quota, codex: quota }
+        : { kind: 'opencode-go', opencodeGo: quota }, error: false };
+      const hero = HeroBudget(props);
+      assert.match(textOf(hero), /OpenCode Go.*5h 69%.*7d 95%/);
+      if (style === 'chips') {
+        const chip = find(hero, node => node.props['data-hero-provider'] === 'opencode-go');
+        assert.ok(chip);
+        assert.match(chip.props['aria-label'], /OpenCode Go 5h 69% · 7d 95%/);
+      }
+    }
+  }
+  publishSettings({ heroMode: 'opencode-go', heroShowIcons: false });
+  budgetState = { data: { kind: 'opencode-go', opencodeGo: {
+    available: false, error: { message: 'Authentication is not configured' },
+  } }, error: false };
+  assert.match(textOf(BudgetPill(props)), /OpenCode Go · 5h — · 7d —/);
+  assert.match(HeroBudget(props).props.title, /Authentication is not configured/);
+  budgetState = { data: null, error: true };
+  assert.match(textOf(HeroBudget(props)), /OpenCode Go.*5h —.*7d —/);
+}
+console.log('OpenCode Go client checks passed: provider routing, dock, hero modes, styles, locales, failures');

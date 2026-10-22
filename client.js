@@ -62,7 +62,7 @@ window.__ModuleLoader__.load({
         showBalance: next.showBalance !== false,
         useOffpeakPricing: next.useOffpeakPricing !== false,
         refreshSeconds: Math.round(boundedNumber(next.refreshSeconds, 15, 600, DEFAULT_SETTINGS.refreshSeconds)),
-        heroMode: ['both', 'current', 'codex', 'deepseek'].includes(next.heroMode) ? next.heroMode : 'both',
+        heroMode: ['both', 'current', 'codex', 'deepseek', 'opencode-go'].includes(next.heroMode) ? next.heroMode : 'both',
         heroStyle: next.heroStyle === 'plain' ? 'plain' : 'chips',
         heroDensity: next.heroDensity === 'comfortable' ? 'comfortable' : 'compact',
         heroShowIcons: next.heroShowIcons !== false,
@@ -395,6 +395,10 @@ window.__ModuleLoader__.load({
       'codex.sevenDay': '7d {percent}',
       'codex.unavailable': '5h — · 7d —',
       'codex.title': 'Codex · {plan}\n5 小时重置：{fiveReset}\n7 天重置：{weekReset}\n{error}',
+      'opencode-go.title': 'OpenCode Go · 剩余额度\n5 小时重置：{fiveReset}\n7 天重置：{weekReset}\n{error}',
+      'hero.opencode-go': 'OpenCode Go 5h {five} · 7d {week}',
+      'hero.opencode-goLabel': 'OpenCode Go',
+      'error.opencode-go': '无法读取 OpenCode Go 用量：{message}',
       'deepseek.balance': '余额 {amount}',
       'deepseek.cost': '本次 {amount}',
       'deepseek.unavailable': '余额 —',
@@ -450,10 +454,11 @@ window.__ModuleLoader__.load({
       'settings.refresh': '刷新间隔',
       'settings.seconds': '{seconds} 秒',
       'settings.heroMode': '新会话页显示',
-      'settings.heroMode.both': 'Codex 与 DeepSeek',
+      'settings.heroMode.both': '全部（Codex / DeepSeek / OpenCode Go）',
       'settings.heroMode.current': '跟随当前模型',
       'settings.heroMode.codex': '仅 Codex',
       'settings.heroMode.deepseek': '仅 DeepSeek',
+      'settings.heroMode.opencode-go': '仅 OpenCode Go',
       'settings.ui': '界面显示',
       'settings.heroStyle': '新会话页样式',
       'settings.heroStyle.desc': '胶囊会显示图标、数值和状态徽标；纯文本沿用单行样式',
@@ -464,7 +469,7 @@ window.__ModuleLoader__.load({
       'settings.heroDensity.compact': '紧凑',
       'settings.heroDensity.comfortable': '标准',
       'settings.heroIcons': '显示图标',
-      'settings.heroIcons.desc': '在 Codex / DeepSeek 胶囊中显示图标',
+      'settings.heroIcons.desc': '在额度与余额胶囊中显示图标',
       'settings.heroPeak': '新会话页显示波峰 / 波谷',
       'settings.heroPeak.desc': '在 DeepSeek 胶囊内显示状态徽标',
       'settings.dockPeak': '输入栏左侧显示波峰 / 波谷',
@@ -483,6 +488,10 @@ window.__ModuleLoader__.load({
       'codex.sevenDay': '7d {percent}',
       'codex.unavailable': '5h — · 7d —',
       'codex.title': 'Codex · {plan}\n5-hour reset: {fiveReset}\n7-day reset: {weekReset}\n{error}',
+      'opencode-go.title': 'OpenCode Go · Remaining quota\n5-hour reset: {fiveReset}\n7-day reset: {weekReset}\n{error}',
+      'hero.opencode-go': 'OpenCode Go 5h {five} · 7d {week}',
+      'hero.opencode-goLabel': 'OpenCode Go',
+      'error.opencode-go': 'OpenCode Go usage unavailable: {message}',
       'deepseek.balance': 'Balance {amount}',
       'deepseek.cost': 'This session {amount}',
       'deepseek.unavailable': 'Balance —',
@@ -538,10 +547,11 @@ window.__ModuleLoader__.load({
       'settings.refresh': 'Refresh interval',
       'settings.seconds': '{seconds}s',
       'settings.heroMode': 'New-session row',
-      'settings.heroMode.both': 'Codex and DeepSeek',
+      'settings.heroMode.both': 'All (Codex / DeepSeek / OpenCode Go)',
       'settings.heroMode.current': 'Follow current model',
       'settings.heroMode.codex': 'Codex only',
       'settings.heroMode.deepseek': 'DeepSeek only',
+      'settings.heroMode.opencode-go': 'OpenCode Go only',
       'settings.ui': 'Interface',
       'settings.heroStyle': 'New-session style',
       'settings.heroStyle.desc': 'Chips show icons, values, and a status badge; plain keeps the single-line style',
@@ -552,7 +562,7 @@ window.__ModuleLoader__.load({
       'settings.heroDensity.compact': 'Compact',
       'settings.heroDensity.comfortable': 'Comfortable',
       'settings.heroIcons': 'Show icons',
-      'settings.heroIcons.desc': 'Show icons inside the Codex / DeepSeek chips',
+      'settings.heroIcons.desc': 'Show icons inside the quota and balance chips',
       'settings.heroPeak': 'Show peak / off-peak on the New Session row',
       'settings.heroPeak.desc': 'Show the status badge inside the DeepSeek chip',
       'settings.dockPeak': 'Show peak / off-peak at the far left of the composer',
@@ -642,6 +652,7 @@ window.__ModuleLoader__.load({
     function kindFor(current) {
       if (!current) return null;
       if (current.provider === 'openai-codex') return 'codex';
+      if (current.provider === 'opencode-go') return 'opencode-go';
       if (/deepseek/i.test(current.provider || '') || /^deepseek/i.test(current.model || '')) return 'deepseek';
       return null;
     }
@@ -779,19 +790,20 @@ window.__ModuleLoader__.load({
       );
       let text;
       let title;
-      if (kind === 'codex') {
-        const codex = data?.kind === 'codex' ? data.codex : null;
-        const available = Boolean(codex?.available);
-        const five = available && codex.fiveHour ? `${Math.round(codex.fiveHour.remainingPercent)}%` : '—';
-        const week = available && codex.weekly ? `${Math.round(codex.weekly.remainingPercent)}%` : '—';
+      if (kind === 'codex' || kind === 'opencode-go') {
+        const quota = data?.kind === kind ? (kind === 'codex' ? data.codex : data.opencodeGo) : null;
+        const available = Boolean(quota?.available);
+        const five = available && quota.fiveHour ? `${Math.round(quota.fiveHour.remainingPercent)}%` : '—';
+        const week = available && quota.weekly ? `${Math.round(quota.weekly.remainingPercent)}%` : '—';
         text = available
           ? `${format(t, 'codex.fiveHour', { percent: five })} · ${format(t, 'codex.sevenDay', { percent: week })}`
           : format(t, 'codex.unavailable');
-        const failure = error ? format(t, 'error.rpc') : codex?.error ? format(t, 'error.codex', { message: codex.error.message || '' }) : '';
-        title = format(t, 'codex.title', {
-          plan: codex?.planType || format(t, 'plan.unknown'),
-          fiveReset: resetTime(codex?.fiveHour?.resetAt, t),
-          weekReset: resetTime(codex?.weekly?.resetAt, t),
+        if (kind === 'opencode-go') text = `OpenCode Go · ${text}`;
+        const failure = error ? format(t, 'error.rpc') : quota?.error ? format(t, `error.${kind}`, { message: quota.error.message || '' }) : '';
+        title = format(t, `${kind}.title`, {
+          plan: quota?.planType || format(t, 'plan.unknown'),
+          fiveReset: resetTime(quota?.fiveHour?.resetAt, t),
+          weekReset: resetTime(quota?.weekly?.resetAt, t),
           error: failure,
         });
       } else {
@@ -861,50 +873,56 @@ window.__ModuleLoader__.load({
           ? { provider: 'openai-codex', model: '' }
           : mode === 'deepseek'
             ? { provider: 'deepseek-official', model: 'deepseek-flash' }
-            : current
-              ? { provider: current.provider, model: current.model }
-              : null;
+            : mode === 'opencode-go'
+              ? { provider: 'opencode-go', model: '' }
+              : current
+                ? { provider: current.provider, model: current.model }
+                : null;
       const { data, error } = useBudgetQuery(rpc, request, settings.refreshSeconds * 1000);
       const codex = mode === 'both' ? data?.codex : data?.kind === 'codex' ? data.codex : null;
+      const opencodeGo = mode === 'both' ? data?.opencodeGo : data?.kind === 'opencode-go' ? data.opencodeGo : null;
       const deepseek = mode === 'both' ? data?.deepseek : data?.kind === 'deepseek' ? data.deepseek : null;
       const wantsCodex = mode === 'both' || mode === 'codex' || (mode === 'current' && kind === 'codex');
+      const wantsOpencodeGo = mode === 'both' || mode === 'opencode-go' || (mode === 'current' && kind === 'opencode-go');
       const wantsDeepseek = (mode === 'both' || mode === 'deepseek' || (mode === 'current' && kind === 'deepseek')) && settings.showBalance;
-      if (!wantsCodex && !wantsDeepseek) return null;
+      if (!wantsCodex && !wantsDeepseek && !wantsOpencodeGo) return null;
 
       const titleLines = [];
       const plainParts = [];
-      let codexChip = null;
+      const quotaChips = [];
       let deepseekChip = null;
       const showChipLabels = settings.heroDensity !== 'compact' || !settings.heroShowIcons;
 
-      if (wantsCodex) {
-        const available = Boolean(codex?.available);
-        const five = available && codex.fiveHour ? `${Math.round(codex.fiveHour.remainingPercent)}%` : '—';
-        const week = available && codex.weekly ? `${Math.round(codex.weekly.remainingPercent)}%` : '—';
-        const failure = error ? format(t, 'error.rpc') : codex?.error ? format(t, 'error.codex', { message: codex.error.message || '' }) : '';
-        const title = format(t, 'codex.title', {
-          plan: codex?.planType || format(t, 'plan.unknown'),
-          fiveReset: resetTime(codex?.fiveHour?.resetAt, t),
-          weekReset: resetTime(codex?.weekly?.resetAt, t),
+      for (const [provider, quota, wanted] of [['codex', codex, wantsCodex], ['opencode-go', opencodeGo, wantsOpencodeGo]]) {
+        if (!wanted) continue;
+        const available = Boolean(quota?.available);
+        const five = available && quota.fiveHour ? `${Math.round(quota.fiveHour.remainingPercent)}%` : '—';
+        const week = available && quota.weekly ? `${Math.round(quota.weekly.remainingPercent)}%` : '—';
+        const failure = error ? format(t, 'error.rpc') : quota?.error ? format(t, `error.${provider}`, { message: quota.error.message || '' }) : '';
+        const title = format(t, `${provider}.title`, {
+          plan: quota?.planType || format(t, 'plan.unknown'),
+          fiveReset: resetTime(quota?.fiveHour?.resetAt, t),
+          weekReset: resetTime(quota?.weekly?.resetAt, t),
           error: failure,
         });
         titleLines.push(title);
         if (settings.heroStyle === 'chips') {
-          codexChip = h('span', {
+          quotaChips.push(h('span', {
+            key: provider,
             className: 'dshBudgetView_chip',
             'data-density': settings.heroDensity,
-            'data-hero-provider': 'codex',
+            'data-hero-provider': provider,
             title,
-            'aria-label': format(t, 'hero.codex', { five, week }),
+            'aria-label': format(t, `hero.${provider}`, { five, week }),
           },
             settings.heroShowIcons ? sparkGlyph('dshBudgetView_chipIcon') : null,
-            showChipLabels ? h('span', { className: 'dshBudgetView_chipLabel' }, format(t, 'hero.codexLabel')) : null,
+            showChipLabels || provider === 'opencode-go' ? h('span', { className: 'dshBudgetView_chipLabel' }, format(t, `hero.${provider}Label`)) : null,
             h('span', { className: 'dshBudgetView_chipValue' }, format(t, 'codex.fiveHour', { percent: five })),
             h('span', { className: 'dshBudgetView_chipSep' }, '·'),
             h('span', { className: 'dshBudgetView_chipValue' }, format(t, 'codex.sevenDay', { percent: week })),
-          );
+          ));
         } else {
-          plainParts.push(format(t, 'hero.codex', { five, week }));
+          plainParts.push(format(t, `hero.${provider}`, { five, week }));
         }
       }
 
@@ -948,12 +966,12 @@ window.__ModuleLoader__.load({
       }
 
       if (settings.heroStyle === 'chips') {
-        if (!codexChip && !deepseekChip) return null;
+        if (quotaChips.length === 0 && !deepseekChip) return null;
         return h('span', {
           className: 'dshBudgetView_heroGroup',
           'data-hero-budget': kind || mode,
           title: titleLines.join('\n\n'),
-        }, codexChip, deepseekChip);
+        }, ...quotaChips, deepseekChip);
       }
       if (plainParts.length === 0) return null;
       return h('span', {
@@ -1110,6 +1128,7 @@ window.__ModuleLoader__.load({
           ['current', t('settings.heroMode.current')],
           ['codex', t('settings.heroMode.codex')],
           ['deepseek', t('settings.heroMode.deepseek')],
+          ['opencode-go', t('settings.heroMode.opencode-go')],
         ]),
         selectRow('heroStyle', t('settings.heroStyle'), t('settings.heroStyle.desc'), [
           ['chips', t('settings.heroStyle.chips')],

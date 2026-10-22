@@ -14,11 +14,12 @@
 **DSH Budget View** 是一个 DeepSeek Harness 插件，在输入框下方和新会话页展示：
 
 - **Codex** 5 小时 / 7 天剩余额度
+- **OpenCode Go** 5 小时 / 7 天剩余额度（读取 `OPENCODE_API_KEY` 环境变量）
 - **DeepSeek API** 账户余额
 - DeepSeek **波峰 / 波谷** 状态
 - 按 DeepSeek 官方人民币峰谷价估算的**本次会话费用**
 
-`0.3.1` 在 DSH Desktop `0.2.1-rc.2` 上适配，使用 DSH 原生 Slot、Projection、主题变量和 RPC 接口。安装后无需额外配置即可显示基础信息；启用 `dsh-context` 后可按请求精确计算 token 与费用。
+`0.4.0` 沿用面向 DSH Desktop `0.2.1-rc.2` 的原生 Slot、Projection、主题变量和 RPC 接口。配置对应服务的凭据后即可显示额度或余额；启用 `dsh-context` 后可按请求精确计算 token 与费用。
 
 ## 功能
 
@@ -34,12 +35,14 @@
 - 悬停可查看北京时间峰谷规则
 - 仅 DeepSeek 官方模型显示峰谷徽标
 - Codex 模型显示 5h / 7d 剩余额度
+- `opencode-go` 提供商的模型显示 `OpenCode Go · 5h 69% · 7d 95%`，悬停查看重置时间
 
 ### 新会话页
 
 在工作区、预设模式同一行的右侧显示紧凑胶囊：
 
 - **Codex**：星标 + `5h 69%` + `7d 95%`
+- **OpenCode Go**：`OpenCode Go` + `5h 69%` + `7d 95%`
 - **DeepSeek**：钱包 + `余额 ¥6.45` + `波峰 / 波谷` 徽标
 - 支持胶囊 / 纯文本两种样式，紧凑 / 标准两种密度
 - 窄窗口自动换行
@@ -57,7 +60,7 @@
 | 显示 DeepSeek 余额 | 开 / 关 | 开 |
 | 区分波峰 / 波谷计价 | 开 / 关 | 开 |
 | 刷新间隔 | 15 / 30 / 60 / 120 / 300 秒 | 60 秒 |
-| 新会话页显示 | Codex 与 DeepSeek / 跟随当前模型 / 仅 Codex / 仅 DeepSeek | 两者 |
+| 新会话页显示 | 全部（Codex / DeepSeek / OpenCode Go）/ 跟随当前模型 / 仅 Codex / 仅 DeepSeek / 仅 OpenCode Go | 全部 |
 | 新会话页样式 | 胶囊 / 徽标、纯文本 | 胶囊 |
 | 胶囊密度 | 紧凑 / 标准 | 紧凑 |
 | 显示图标 | 开 / 关 | 开 |
@@ -68,6 +71,21 @@
 | DeepSeek API 基址 | URL | `https://api.deepseek.com` |
 
 设置保存在 `$DSH_HOME/storages/dsh-budget-view.json`。
+
+### OpenCode Go 凭据
+
+在运行 DSH 的环境中设置 `OPENCODE_API_KEY`，然后完全退出并重新启动 DSH，让 Host 进程读取新的环境变量。Windows PowerShell 可持久化为用户环境变量：
+
+```powershell
+[Environment]::SetEnvironmentVariable('OPENCODE_API_KEY', '你的 OpenCode API Key', 'User')
+```
+
+额度由 Host 使用 Bearer 认证查询 `https://opencode.ai/zen/go/v1/usage`。接口来源见 [OpenCode 官方用量接口 PR](https://github.com/anomalyco/opencode/pull/16513)。当前响应的 `usage.rolling` / `usage.weekly` 对应 5 小时 / 7 天窗口，`percent` 是已用百分比；插件显示 `100 - percent`，并兼容旧版 `rollingUsage` / `weeklyUsage` 响应。
+
+- Key 只从 Host 的进程环境读取，不写入插件设置，也不会返回浏览器。
+- 使用既有刷新间隔，Host 对成功结果缓存最多 30 秒；更换 Key 会使用独立缓存。
+- `rate-limited` 窗口显示 `0%` 剩余；缺少 Key、认证失败或查询失败时显示 `—`，悬停查看原因。
+- `opencode-go` 下的 DeepSeek 模型显示 Go 订阅额度，不展示 DeepSeek 官方账户余额或会话费用。
 
 ## 计价规则
 
@@ -117,33 +135,37 @@ DeepSeek 价格本身为人民币；美元显示按 `CNY 成本 ÷ USD→CNY 汇
 2. 输入 npm 包名：
 
    ```text
-   dsh-budget-view@0.3.1
+   dsh-budget-view@0.4.0
    ```
 
 3. 安装后完全退出并重新打开 DSH。
 4. 在输入框下方和新会话页查看预算信息。
 
-安装源可选择 npm 官方源或镜像源。镜像同步可能延迟，固定版本可使用 `dsh-budget-view@0.3.1`。
+安装源可选择 npm 官方源或镜像源。镜像同步可能延迟，固定版本可使用 `dsh-budget-view@0.4.0`。
 
 ### 使用 dsh 命令
 
 先启动一次 DSH Desktop 完成初始化，再完全退出，在终端运行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-budget-view@0.3.1
+dsh plugin --profile desktop add dsh-budget-view@0.4.0
 ```
 
 安装后重新打开 DSH。
 
 ### 从 Release 或本地包安装
 
-从 [Releases](https://github.com/SuShuheng/dsh-budget-view/releases) 下载 `dsh-budget-view-0.3.1.tgz`，在插件页面选择本地安装。也可以使用：
+从 [v0.4.0 Release](https://github.com/SuShuheng/dsh-budget-view/releases/tag/v0.4.0) 下载 [dsh-budget-view-0.4.0.tgz](https://github.com/SuShuheng/dsh-budget-view/releases/download/v0.4.0/dsh-budget-view-0.4.0.tgz)，在插件页面选择本地安装。也可以使用版本标签：
 
 ```text
-github:SuShuheng/dsh-budget-view#v0.3.1
+github:SuShuheng/dsh-budget-view#v0.4.0
 ```
 
 本地开发目录可直接添加；安装后同样需要重启 DSH。
+
+### 从 0.3.1 升级
+
+更新到 `dsh-budget-view@0.4.0`，设置 `OPENCODE_API_KEY` 后完全重启 DSH。既有设置会保留；新会话页原来的“Codex 与 DeepSeek”（`heroMode: "both"`）现在显示全部三项，也可在插件设置中选择“跟随当前模型”或“仅 OpenCode Go”。
 
 ## 兼容性与依赖
 
@@ -155,10 +177,11 @@ github:SuShuheng/dsh-budget-view#v0.3.1
 网络接口：
 
 - Codex：`https://chatgpt.com/backend-api/wham/usage`
+- OpenCode Go：`https://opencode.ai/zen/go/v1/usage`
 - DeepSeek：`https://api.deepseek.com/user/balance`
 - 汇率：`https://api.frankfurter.app/latest?from=USD&to=CNY`
 
-DeepSeek API Key 通过 DSH credentials 服务读取，Codex 凭据通过 `codexAuth` 服务或本地 `auth.json` 读取，**不会返回给浏览器**。
+DeepSeek API Key 通过 DSH credentials 服务读取，Codex 凭据通过 `codexAuth` 服务或本地 `auth.json` 读取，OpenCode Go Key 从 `OPENCODE_API_KEY` 环境变量读取，**不会返回给浏览器**。
 
 ## 开发与验证
 
@@ -175,6 +198,9 @@ npm test
 - `cnHolidays` 追加日期
 - `contextActivity` / `contextTimeline` / `tokenUsage` 三级回退
 - CNY / USD 显示
+- OpenCode Go 的 Host RPC、Bearer 认证、剩余额度换算、新旧响应、缓存与换 Key
+- OpenCode Go 的缺失凭据、认证失败、超时、无效响应及汇总查询隔离
+- OpenCode Go 的输入栏、新会话页显示模式、胶囊 / 纯文本及中英文文案
 
 发布前会执行 `prepublishOnly` 的语法检查与测试。
 
@@ -182,6 +208,7 @@ npm test
 
 | 版本 | 内容 |
 | --- | --- |
+| **0.4.0** | 新增 OpenCode Go 5 小时 / 7 天剩余额度；读取 `OPENCODE_API_KEY`；支持输入栏与新会话页显示。 |
 | **0.3.1** | 按国务院 2025–2026 节假日将法定节假日计为波谷；使用 `contextActivity` 按日重算；新增 `cnHolidays`。 |
 | **0.3.0** | 输入栏新增波峰 / 波谷徽标；新会话页改为可配置胶囊；新增样式、密度、图标与徽标设置。 |
 | **0.2.0** | 插件详情设置；新会话页 Codex / DeepSeek 信息；ECB 实时汇率；DeepSeek 人民币峰谷价。 |

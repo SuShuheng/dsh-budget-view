@@ -15,5 +15,5 @@ jobs:
           node-version: 22
       - name: Syntax check
         run: npm run check
-      - name: Client tests
+      - name: Client and Host tests
         run: npm test

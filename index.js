@@ -1,11 +1,13 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export const name = 'dsh-budget-view';
 
 const DEFAULT_CODEX_URL = 'https://chatgpt.com/backend-api/wham/usage';
 const DEFAULT_DEEPSEEK_BASE = 'https://api.deepseek.com';
+const OPENCODE_GO_USAGE_URL = 'https://opencode.ai/zen/go/v1/usage';
 const FX_URL = 'https://api.frankfurter.app/latest?from=USD&to=CNY';
 const FX_SOURCE = 'ECB reference rates via Frankfurter';
 const BEIJING_OFFSET_MS = 8 * 60 * 60 * 1000;
@@ -60,7 +62,7 @@ function normalizeSettings(value) {
     showBalance: next.showBalance !== false,
     useOffpeakPricing: next.useOffpeakPricing !== false,
     refreshSeconds: Math.round(boundedNumber(next.refreshSeconds, 15, 600, DEFAULT_SETTINGS.refreshSeconds)),
-    heroMode: ['both', 'current', 'codex', 'deepseek'].includes(next.heroMode) ? next.heroMode : 'both',
+    heroMode: ['both', 'current', 'codex', 'deepseek', 'opencode-go'].includes(next.heroMode) ? next.heroMode : 'both',
     heroStyle: next.heroStyle === 'plain' ? 'plain' : 'chips',
     heroDensity: next.heroDensity === 'comfortable' ? 'comfortable' : 'compact',
     heroShowIcons: next.heroShowIcons !== false,
@@ -102,6 +104,7 @@ async function writeSettings(value) {
 }
 
 const codexCache = new Map();
+const opencodeGoCache = new Map();
 const deepseekCache = new Map();
 const fxCache = new Map();
 
@@ -365,7 +368,7 @@ async function queryCodex(ctx, cfg, signal) {
         authorization: `Bearer ${credential.accessToken}`,
         ...(credential.accountId ? { 'chatgpt-account-id': credential.accountId } : {}),
         'content-type': 'application/json',
-        'user-agent': 'dsh-budget-view/0.3.1',
+        'user-agent': 'dsh-budget-view/0.4.0',
       },
       signal: requestSignal,
     });
@@ -386,6 +389,59 @@ async function queryCodex(ctx, cfg, signal) {
   } catch (error) {
     const failure = sanitizedError(error, 'Could not load Codex usage');
     return { kind: 'codex', codex: { available: false, error: failure } };
+  }
+}
+
+function opencodeGoWindow(window, windowSeconds) {
+  if (!window || typeof window !== 'object') return null;
+  // The current API uses percent/resetsAt; the original endpoint used
+  // usagePercent/resetInSec in rollingUsage and weeklyUsage.
+  const used = window.percent ?? window.usagePercent;
+  if (window.status !== 'rate-limited' && (typeof used !== 'number' || !Number.isFinite(used))) return null;
+  const reset = typeof window.resetsAt === 'string'
+    ? new Date(window.resetsAt)
+    : typeof window.resetInSec === 'number' && Number.isFinite(window.resetInSec)
+      ? new Date(Date.now() + window.resetInSec * 1000)
+      : null;
+  return {
+    remainingPercent: window.status === 'rate-limited' ? 0 : clamp(100 - used),
+    resetAt: reset && Number.isFinite(reset.getTime()) ? reset.toISOString() : undefined,
+    windowSeconds,
+  };
+}
+
+async function queryOpencodeGo(signal) {
+  try {
+    const key = process.env.OPENCODE_API_KEY?.trim();
+    if (!key) throw Object.assign(new Error('Missing OpenCode API key'), { code: 'missing-credentials' });
+    const cacheKey = createHash('sha256').update(key).digest('hex');
+    const cached = opencodeGoCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return { kind: 'opencode-go', opencodeGo: cached.value };
+    const response = await fetch(OPENCODE_GO_USAGE_URL, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${key}`, accept: 'application/json' },
+      redirect: 'error',
+      signal: combineSignal(signal, 10_000),
+    });
+    if (!response.ok) throw Object.assign(new Error('OpenCode Go request failed'), {
+      status: response.status,
+      code: response.status === 401 || response.status === 403 ? 'invalid-auth' : 'upstream-error',
+    });
+    const payload = await response.json().catch(() => {
+      throw Object.assign(new Error('Invalid usage JSON'), { code: 'invalid-response' });
+    });
+    const fiveHour = opencodeGoWindow(payload?.usage?.rolling ?? payload?.rollingUsage, 18000);
+    const weekly = opencodeGoWindow(payload?.usage?.weekly ?? payload?.weeklyUsage, 604800);
+    if (!fiveHour || !weekly) throw Object.assign(new Error('Missing usage windows'), { code: 'invalid-response' });
+    const value = { available: true, fiveHour, weekly };
+    const resets = [fiveHour, weekly].map(window => Date.parse(window.resetAt)).filter(time => time > Date.now());
+    opencodeGoCache.clear();
+    opencodeGoCache.set(cacheKey, { value, expiresAt: Math.min(Date.now() + 30_000, ...resets) });
+    return { kind: 'opencode-go', opencodeGo: value };
+  } catch (error) {
+    if (error?.name === 'TimeoutError') error = { code: 'timeout' };
+    else if (error?.name === 'AbortError') error = { code: 'aborted' };
+    return { kind: 'opencode-go', opencodeGo: { available: false, error: sanitizedError(error, 'Could not load OpenCode Go usage') } };
   }
 }
 
@@ -415,7 +471,7 @@ async function queryFx(cfg, signal, force = false) {
       method: 'GET',
       headers: {
         accept: 'application/json',
-        'user-agent': 'dsh-budget-view/0.3.1',
+        'user-agent': 'dsh-budget-view/0.4.0',
       },
       signal: combineSignal(signal, 8_000),
     });
@@ -511,11 +567,12 @@ async function queryDeepseek(ctx, cfg, model, signal) {
 }
 
 async function querySummary(ctx, cfg, signal) {
-  const [codex, deepseek] = await Promise.all([
+  const [codex, deepseek, opencodeGo] = await Promise.all([
     queryCodex(ctx, cfg, signal),
     queryDeepseek(ctx, cfg, 'deepseek-flash', signal),
+    queryOpencodeGo(signal),
   ]);
-  return { kind: 'summary', codex: codex.codex, deepseek: deepseek.deepseek };
+  return { kind: 'summary', codex: codex.codex, deepseek: deepseek.deepseek, opencodeGo: opencodeGo.opencodeGo };
 }
 
 export const inject = ['connection'];
@@ -578,6 +635,7 @@ export function apply(ctx) {
       try {
         if (provider === '__summary__') result = { ok: true, value: await querySummary(ctx, cfg, request.signal) };
         else if (provider === 'openai-codex') result = { ok: true, value: await queryCodex(ctx, cfg, request.signal) };
+        else if (provider === 'opencode-go') result = { ok: true, value: await queryOpencodeGo(request.signal) };
         else if (/deepseek/i.test(provider) || /^deepseek/i.test(model)) result = { ok: true, value: await queryDeepseek(ctx, cfg, model, request.signal) };
         else result = { ok: true, value: { kind: 'none' } };
       } catch {

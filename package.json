@@ -1,7 +1,7 @@
 {
   "name": "dsh-budget-view",
-  "version": "0.3.1",
-  "description": "DSH 插件：在输入栏和新会话页展示 Codex 额度、DeepSeek 余额、波峰/波谷状态，并按 DeepSeek 官方人民币峰谷价估算会话费用。",
+  "version": "0.4.0",
+  "description": "DSH 插件：在输入栏和新会话页展示 Codex / OpenCode Go 额度、DeepSeek 余额、波峰/波谷状态，并按 DeepSeek 官方人民币峰谷价估算会话费用。",
   "type": "module",
   "main": "index.js",
   "private": false,
@@ -20,11 +20,12 @@
     "icon.svg",
     "README.md",
     "LICENSE",
-    "verify-client.mjs"
+    "verify-client.mjs",
+    "verify-host.mjs"
   ],
   "scripts": {
-    "check": "node --check index.js && node --check client.js && node --check verify-client.mjs",
-    "test": "node verify-client.mjs",
+    "check": "node --check index.js && node --check client.js && node --check verify-client.mjs && node --check verify-host.mjs",
+    "test": "node verify-client.mjs && node verify-host.mjs",
     "prepublishOnly": "npm run check && npm test"
   },
   "repository": {
@@ -46,6 +47,7 @@
     "usage",
     "cost",
     "codex",
+    "opencode-go",
     "deepseek",
     "token"
   ],
