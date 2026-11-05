@@ -32,6 +32,9 @@ const DEFAULT_SETTINGS = Object.freeze({
   deepseekBaseUrl: DEFAULT_DEEPSEEK_BASE,
   codexAuthJsonPath: '',
   codexUsageUrl: DEFAULT_CODEX_URL,
+  budgetSource: 'auto',
+  magpieBaseUrl: '',
+  magpieApiKeyRef: 'MAGPIE_GATEWAY_KEY',
   pricing: {},
 });
 
@@ -75,6 +78,9 @@ function normalizeSettings(value) {
     deepseekBaseUrl: typeof next.deepseekBaseUrl === 'string' && next.deepseekBaseUrl.trim() ? next.deepseekBaseUrl.trim() : DEFAULT_DEEPSEEK_BASE,
     codexAuthJsonPath: typeof next.codexAuthJsonPath === 'string' ? next.codexAuthJsonPath.trim() : '',
     codexUsageUrl: typeof next.codexUsageUrl === 'string' && next.codexUsageUrl.trim() ? next.codexUsageUrl.trim() : DEFAULT_CODEX_URL,
+    budgetSource: ['native', 'magpie'].includes(next.budgetSource) ? next.budgetSource : 'auto',
+    magpieBaseUrl: typeof next.magpieBaseUrl === 'string' ? next.magpieBaseUrl.trim() : '',
+    magpieApiKeyRef: typeof next.magpieApiKeyRef === 'string' && next.magpieApiKeyRef.trim() ? next.magpieApiKeyRef.trim() : 'MAGPIE_GATEWAY_KEY',
     pricing: next.pricing && typeof next.pricing === 'object' && !Array.isArray(next.pricing) ? next.pricing : {},
   };
 }
@@ -107,6 +113,161 @@ const codexCache = new Map();
 const opencodeGoCache = new Map();
 const deepseekCache = new Map();
 const fxCache = new Map();
+const magpieCache = new Map();
+
+function isMagpieProvider(provider) {
+  return ['magpie', 'magpie-responses', 'magpie-anthropic'].includes(provider);
+}
+
+function budgetKind(provider, model) {
+  // A gateway's model id names its upstream. Check it before the model name:
+  // opencode-go/deepseek-v4-pro consumes Go quota, not a DeepSeek wallet.
+  if (isMagpieProvider(provider)) {
+    const upstream = model.split('/')[0];
+    if (upstream === 'codex') return 'codex';
+    if (upstream === 'opencode-go') return 'opencode-go';
+    if (upstream === 'deepseek' || upstream === 'deepseek-ai') return 'deepseek';
+    return null;
+  }
+  if (provider === 'openai-codex') return 'codex';
+  if (provider === 'opencode-go') return 'opencode-go';
+  if (/deepseek/i.test(provider) || /^deepseek/i.test(model)) return 'deepseek';
+  return null;
+}
+
+async function credentialValue(ctx, ref) {
+  try {
+    const resolved = await ctx.get('credentials')?.resolve(ref);
+    if (typeof resolved?.value === 'string' && resolved.value.trim()) return resolved.value.trim();
+  } catch {
+    // Installations without the optional credentials service use their environment.
+  }
+  return process.env[ref]?.trim() || '';
+}
+
+async function magpieUsageUrl(cfg) {
+  let base = cfg.magpieBaseUrl;
+  if (!base && process.env.MAGPIE_ADDR) {
+    const address = process.env.MAGPIE_ADDR.trim();
+    base = /^https?:\/\//.test(address) ? address : `http://${address}`;
+  }
+  if (!base) {
+    let port = 3425;
+    try {
+      const file = join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'magpie', 'settings.json');
+      const settings = JSON.parse(await readFile(file, 'utf8'));
+      if (Number.isInteger(settings.port) && settings.port > 0 && settings.port <= 65535) port = settings.port;
+    } catch { /* The default gateway address also works without a local installation. */ }
+    base = `http://127.0.0.1:${port}`;
+  }
+  const url = new URL(base);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw Object.assign(new Error('Invalid gateway URL'), { code: 'invalid-response' });
+  }
+  url.pathname = `${url.pathname.replace(/\/+$/, '').replace(/\/v1$/, '')}/v1/magpie/quotas`;
+  url.search = '';
+  url.hash = '';
+  return url.href;
+}
+
+async function readMagpie(ctx, cfg, signal) {
+  try {
+    const url = await magpieUsageUrl(cfg);
+    const key = await credentialValue(ctx, cfg.magpieApiKeyRef);
+    const cacheKey = `${url}\u0000${createHash('sha256').update(key).digest('hex')}`;
+    const cached = magpieCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return { cards: cached.cards };
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { accept: 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) },
+      redirect: 'error',
+      // Magpie gives its upstream readers 12 seconds.
+      signal: combineSignal(signal, 15_000),
+    });
+    if (!response.ok) throw Object.assign(new Error('Magpie usage request failed'), {
+      status: response.status, code: [401, 403].includes(response.status) ? 'invalid-auth' : 'upstream-error',
+    });
+    const payload = await response.json().catch(() => {
+      throw Object.assign(new Error('Invalid gateway JSON'), { code: 'invalid-response' });
+    });
+    const cards = Array.isArray(payload) ? payload : payload?.data;
+    if (!Array.isArray(cards)) throw Object.assign(new Error('Missing quota cards'), { code: 'invalid-response' });
+    magpieCache.set(cacheKey, { cards, expiresAt: Date.now() + 30_000 });
+    return { cards };
+  } catch (error) {
+    return { error: sanitizedError(error, 'Could not load Magpie usage') };
+  }
+}
+
+function magpieWindow(windows, seconds) {
+  const names = seconds === 18000 ? /^(5\s*(h|hours?))$/i : /^(7\s*(d|days?)|week(ly)?)$/i;
+  const window = Array.isArray(windows) ? windows.find(value => value && names.test(value.name)) : null;
+  if (!window || window.text || window.unlimited) return null;
+  const remaining = typeof window.remaining === 'number' ? window.remaining
+    : typeof window.used === 'number' ? 100 - window.used : NaN;
+  if (!Number.isFinite(remaining)) return null;
+  const reset = typeof window.resetsAt === 'string' ? new Date(window.resetsAt) : null;
+  return {
+    remainingPercent: clamp(remaining),
+    resetAt: reset && Number.isFinite(reset.getTime()) ? reset.toISOString() : undefined,
+    windowSeconds: seconds,
+  };
+}
+
+function magpieBalance(text) {
+  if (typeof text !== 'string') return null;
+  if (text.includes('·')) {
+    const balances = text.split('·').map(magpieBalance);
+    if (balances.some(value => !value)) return null;
+    return balances.find(value => value.currency === 'CNY') || balances[0];
+  }
+  const match = text.trim().match(/^(¥|￥|CNY|RMB|\$|USD)\s*(-?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?)$/i);
+  if (!match) return null;
+  return {
+    isAvailable: Number(match[2].replaceAll(',', '')) > 0,
+    currency: /^(\$|USD)$/i.test(match[1]) ? 'USD' : 'CNY',
+    totalBalance: match[2].replaceAll(',', ''),
+    grantedBalance: '',
+    toppedUpBalance: '',
+  };
+}
+
+async function queryMagpie(ctx, cfg, kind, model, signal, report) {
+  const result = report || await readMagpie(ctx, cfg, signal);
+  const ids = kind === 'deepseek' ? ['deepseek', 'deepseek-ai'] : [kind];
+  const matches = result.cards?.filter(card => card && ids.includes(card.provider)
+    && card.kind === (kind === 'codex' ? 'subscription' : kind === 'deepseek' ? 'balance' : 'plan')) || [];
+  // Keep the windows of one account together; never add percentages from accounts.
+  matches.sort((a, b) => (Date.parse(b.lastServedAt) || 0) - (Date.parse(a.lastServedAt) || 0));
+  const card = matches[0];
+  let error = result.error || (!card ? { code: 'missing-credentials', message: 'This provider is not configured in Magpie' }
+    : card.error ? { code: 'upstream-error', message: 'Magpie could not read this provider allowance' } : null);
+  const metadata = { source: 'magpie', readAt: card?.readAt || null, stale: Boolean(card?.asOf || card?.readDeferred) };
+  if (kind === 'deepseek') {
+    const balance = error ? null : magpieBalance(card.balance);
+    if (!error && !balance) error = { code: 'invalid-response', message: 'Magpie returned an invalid DeepSeek balance' };
+    if (balance && Array.isArray(card.balanceSplit)) {
+      for (const part of card.balanceSplit) {
+        const amount = part && !part.error ? magpieBalance(part.text) : null;
+        if (!amount || amount.currency !== balance.currency) continue;
+        if (part.label === 'Granted') balance.grantedBalance = amount.totalBalance;
+        if (part.label === 'Topped up') balance.toppedUpBalance = amount.totalBalance;
+      }
+    }
+    const upstreamModel = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
+    return { kind, deepseek: {
+      ...metadata, balance, error, pricing: pricingFor(upstreamModel, cfg.pricing, cfg.cnHolidays),
+      pricingTable: pricingTable(cfg.pricing), fx: await queryFx(cfg, signal),
+    } };
+  }
+  const fiveHour = error ? null : magpieWindow(card.windows, 18000);
+  const weekly = error ? null : magpieWindow(card.windows, 604800);
+  if (!error && (!fiveHour || !weekly)) error = { code: 'invalid-response', message: 'Magpie returned invalid usage windows' };
+  return { kind, [kind === 'codex' ? 'codex' : 'opencodeGo']: {
+    ...metadata, available: !error, fiveHour, weekly, error,
+    ...(typeof card?.plan === 'string' ? { planType: card.plan } : {}),
+  } };
+}
 
 // DeepSeek's official CNY list price, per one million tokens. Peak is twice off-peak.
 const DEFAULT_PRICING = Object.freeze({
@@ -256,6 +417,8 @@ function errorResult(code, message) {
 }
 
 function sanitizedError(error, fallback = 'Request failed') {
+  if (error?.name === 'TimeoutError') error = { code: 'timeout' };
+  else if (error?.name === 'AbortError') error = { code: 'aborted' };
   const status = Number(error?.status ?? error?.statusCode);
   if (Number.isFinite(status) && status > 0) {
     const code = error?.code === 'invalid-auth' ? 'invalid-auth' : 'upstream-error';
@@ -357,7 +520,8 @@ async function queryCodex(ctx, cfg, signal) {
     const credential = await readCodexCredential(ctx, cfg, signal);
     authPath = credential.authPath || authPath;
     const url = cfg.codexUsageUrl;
-    const cacheKey = `${authPath}\u0000${url}`;
+    const fingerprint = createHash('sha256').update(credential.accessToken).update('\u0000').update(credential.accountId || '').digest('hex');
+    const cacheKey = `${authPath}\u0000${url}\u0000${fingerprint}`;
     const cached = codexCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) return { kind: 'codex', codex: cached.value };
 
@@ -368,7 +532,7 @@ async function queryCodex(ctx, cfg, signal) {
         authorization: `Bearer ${credential.accessToken}`,
         ...(credential.accountId ? { 'chatgpt-account-id': credential.accountId } : {}),
         'content-type': 'application/json',
-        'user-agent': 'dsh-budget-view/0.4.0',
+        'user-agent': 'dsh-budget-view/0.5.0',
       },
       signal: requestSignal,
     });
@@ -410,9 +574,9 @@ function opencodeGoWindow(window, windowSeconds) {
   };
 }
 
-async function queryOpencodeGo(signal) {
+async function queryOpencodeGo(ctx, signal) {
   try {
-    const key = process.env.OPENCODE_API_KEY?.trim();
+    const key = await credentialValue(ctx, 'OPENCODE_API_KEY');
     if (!key) throw Object.assign(new Error('Missing OpenCode API key'), { code: 'missing-credentials' });
     const cacheKey = createHash('sha256').update(key).digest('hex');
     const cached = opencodeGoCache.get(cacheKey);
@@ -471,7 +635,7 @@ async function queryFx(cfg, signal, force = false) {
       method: 'GET',
       headers: {
         accept: 'application/json',
-        'user-agent': 'dsh-budget-view/0.4.0',
+        'user-agent': 'dsh-budget-view/0.5.0',
       },
       signal: combineSignal(signal, 8_000),
     });
@@ -511,14 +675,8 @@ async function queryFx(cfg, signal, force = false) {
 
 async function deepseekApiKey(ctx, cfg) {
   const ref = cfg.deepseekApiKeyRef || 'DEEPSEEK_API_KEY';
-  try {
-    const credentials = ctx.get('credentials');
-    const resolved = await credentials?.resolve(ref);
-    if (typeof resolved?.value === 'string' && resolved.value) return resolved.value;
-  } catch {
-    // Try process environment after the credential service.
-  }
-  if (typeof process.env[ref] === 'string' && process.env[ref]) return process.env[ref];
+  const key = await credentialValue(ctx, ref);
+  if (key) return key;
   throw Object.assign(new Error('Missing DeepSeek API credential'), { code: 'missing-credentials' });
 }
 
@@ -526,17 +684,14 @@ async function queryDeepseek(ctx, cfg, model, signal) {
   const pricing = pricingFor(model, cfg.pricing, cfg.cnHolidays);
   const table = pricingTable(cfg.pricing);
   const fxPromise = queryFx(cfg, signal);
-  const cacheKey = `${cfg.deepseekApiKeyRef || 'DEEPSEEK_API_KEY'}\u0000${cfg.deepseekBaseUrl || DEFAULT_DEEPSEEK_BASE}`;
-
-  const cached = deepseekCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    const fx = await fxPromise;
-    return { kind: 'deepseek', deepseek: { pricing, pricingTable: table, balance: cached.balance, fx, error: null } };
-  }
-
   try {
     const key = await deepseekApiKey(ctx, cfg);
     const base = (cfg.deepseekBaseUrl || DEFAULT_DEEPSEEK_BASE).replace(/\/+$/, '');
+    const cacheKey = `${base}\u0000${createHash('sha256').update(key).digest('hex')}`;
+    const cached = deepseekCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { kind: 'deepseek', deepseek: { pricing, pricingTable: table, balance: cached.balance, fx: await fxPromise, error: null } };
+    }
     const response = await fetch(`${base}/user/balance`, {
       method: 'GET',
       headers: { accept: 'application/json', authorization: `Bearer ${key}` },
@@ -566,11 +721,32 @@ async function queryDeepseek(ctx, cfg, model, signal) {
   }
 }
 
+async function queryBudget(ctx, cfg, provider, model, signal, report) {
+  const kind = budgetKind(provider, model);
+  if (!kind) return { kind: 'none' };
+  if (cfg.budgetSource !== 'native') {
+    report ||= await readMagpie(ctx, cfg, signal);
+    const ids = kind === 'deepseek' ? ['deepseek', 'deepseek-ai'] : [kind];
+    if (cfg.budgetSource === 'magpie' || isMagpieProvider(provider)
+      || report.cards?.some(card => card && ids.includes(card.provider))) {
+      return queryMagpie(ctx, cfg, kind, model, signal, report);
+    }
+  } else if (isMagpieProvider(provider)) {
+    return queryMagpie(ctx, cfg, kind, model, signal, {
+      error: { code: 'missing-credentials', message: 'Enable the Magpie budget source for this model' },
+    });
+  }
+  if (kind === 'codex') return queryCodex(ctx, cfg, signal);
+  if (kind === 'opencode-go') return queryOpencodeGo(ctx, signal);
+  return queryDeepseek(ctx, cfg, model, signal);
+}
+
 async function querySummary(ctx, cfg, signal) {
+  const report = cfg.budgetSource === 'native' ? undefined : await readMagpie(ctx, cfg, signal);
   const [codex, deepseek, opencodeGo] = await Promise.all([
-    queryCodex(ctx, cfg, signal),
-    queryDeepseek(ctx, cfg, 'deepseek-flash', signal),
-    queryOpencodeGo(signal),
+    queryBudget(ctx, cfg, 'openai-codex', '', signal, report),
+    queryBudget(ctx, cfg, 'deepseek-official', 'deepseek-flash', signal, report),
+    queryBudget(ctx, cfg, 'opencode-go', '', signal, report),
   ]);
   return { kind: 'summary', codex: codex.codex, deepseek: deepseek.deepseek, opencodeGo: opencodeGo.opencodeGo };
 }
@@ -634,10 +810,7 @@ export function apply(ctx) {
       let result;
       try {
         if (provider === '__summary__') result = { ok: true, value: await querySummary(ctx, cfg, request.signal) };
-        else if (provider === 'openai-codex') result = { ok: true, value: await queryCodex(ctx, cfg, request.signal) };
-        else if (provider === 'opencode-go') result = { ok: true, value: await queryOpencodeGo(request.signal) };
-        else if (/deepseek/i.test(provider) || /^deepseek/i.test(model)) result = { ok: true, value: await queryDeepseek(ctx, cfg, model, request.signal) };
-        else result = { ok: true, value: { kind: 'none' } };
+        else result = { ok: true, value: await queryBudget(ctx, cfg, provider, model, request.signal) };
       } catch {
         result = errorResult('internal', 'request failed');
       }

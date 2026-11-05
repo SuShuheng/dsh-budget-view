@@ -25,6 +25,9 @@ window.__ModuleLoader__.load({
       deepseekBaseUrl: 'https://api.deepseek.com',
       codexAuthJsonPath: '',
       codexUsageUrl: 'https://chatgpt.com/backend-api/wham/usage',
+      budgetSource: 'auto',
+      magpieBaseUrl: '',
+      magpieApiKeyRef: 'MAGPIE_GATEWAY_KEY',
       pricing: {},
     });
 
@@ -75,6 +78,9 @@ window.__ModuleLoader__.load({
         deepseekBaseUrl: typeof next.deepseekBaseUrl === 'string' && next.deepseekBaseUrl.trim() ? next.deepseekBaseUrl.trim() : 'https://api.deepseek.com',
         codexAuthJsonPath: typeof next.codexAuthJsonPath === 'string' ? next.codexAuthJsonPath.trim() : '',
         codexUsageUrl: typeof next.codexUsageUrl === 'string' && next.codexUsageUrl.trim() ? next.codexUsageUrl.trim() : 'https://chatgpt.com/backend-api/wham/usage',
+        budgetSource: ['native', 'magpie'].includes(next.budgetSource) ? next.budgetSource : 'auto',
+        magpieBaseUrl: typeof next.magpieBaseUrl === 'string' ? next.magpieBaseUrl.trim() : '',
+        magpieApiKeyRef: typeof next.magpieApiKeyRef === 'string' && next.magpieApiKeyRef.trim() ? next.magpieApiKeyRef.trim() : 'MAGPIE_GATEWAY_KEY',
         pricing: next.pricing && typeof next.pricing === 'object' && !Array.isArray(next.pricing) ? next.pricing : {},
       };
     }
@@ -106,7 +112,7 @@ window.__ModuleLoader__.load({
     });
 
     function canonicalModel(modelId) {
-      const id = typeof modelId === 'string' ? modelId.trim().toLowerCase() : '';
+      const id = typeof modelId === 'string' ? modelId.trim().toLowerCase().replace(/^(deepseek|deepseek-ai)\//, '') : '';
       if (!id) return null;
       if (MODEL_ALIASES[id]) return MODEL_ALIASES[id];
       if (id.startsWith('deepseek-v4-pro')) return 'deepseek-v4-pro';
@@ -115,7 +121,7 @@ window.__ModuleLoader__.load({
     }
 
     function isDeepseekModel(provider, model) {
-      return /deepseek/i.test(provider || '') || /^deepseek/i.test(model || '');
+      return kindFor({ provider, model }) === 'deepseek';
     }
 
     // Chinese public holidays from the State Council 2025/2026 notices. Weekends are
@@ -478,6 +484,17 @@ window.__ModuleLoader__.load({
       'settings.codexPath.desc': '留空使用 ~/.codex/auth.json',
       'settings.deepseekRef': 'DeepSeek 凭据引用',
       'settings.deepseekBase': 'DeepSeek API 基址',
+      'settings.budgetSource': '余额与额度来源',
+      'settings.budgetSource.desc': '自动优先读取 Magpie，缺少对应服务时回退原生；原生模式下不读取 Magpie 模型额度。',
+      'settings.budgetSource.auto': '自动',
+      'settings.budgetSource.native': '原生',
+      'settings.budgetSource.magpie': 'Magpie',
+      'settings.magpieBase': 'Magpie 网关地址',
+      'settings.magpieBase.desc': '留空自动读取 MAGPIE_ADDR 或 Magpie 设置中的端口，默认 http://127.0.0.1:3425。',
+      'settings.magpieRef': 'Magpie 网关凭据引用',
+      'settings.magpieRef.desc': '本机通常无需认证；远程网关填写已保存的网关 Key 引用。',
+      'budget.magpieSource': '来源：Magpie · 读取时间：{time}{stale}',
+      'budget.stale': '（缓存）',
       'settings.saved': '已保存',
       'settings.saving': '正在保存…',
       'settings.error': '保存失败',
@@ -571,6 +588,17 @@ window.__ModuleLoader__.load({
       'settings.codexPath.desc': 'Empty uses ~/.codex/auth.json',
       'settings.deepseekRef': 'DeepSeek credential reference',
       'settings.deepseekBase': 'DeepSeek API base URL',
+      'settings.budgetSource': 'Balance and quota source',
+      'settings.budgetSource.desc': 'Auto prefers Magpie and falls back to native for missing providers. Native mode disables quota queries for Magpie models.',
+      'settings.budgetSource.auto': 'Auto',
+      'settings.budgetSource.native': 'Native',
+      'settings.budgetSource.magpie': 'Magpie',
+      'settings.magpieBase': 'Magpie gateway URL',
+      'settings.magpieBase.desc': 'Leave empty to use MAGPIE_ADDR or the port in Magpie settings; defaults to http://127.0.0.1:3425.',
+      'settings.magpieRef': 'Magpie gateway credential reference',
+      'settings.magpieRef.desc': 'Local access usually needs no authentication. For a remote gateway, use its saved key reference.',
+      'budget.magpieSource': 'Source: Magpie · Read at: {time}{stale}',
+      'budget.stale': ' (cached)',
       'settings.saved': 'Saved',
       'settings.saving': 'Saving…',
       'settings.error': 'Save failed',
@@ -651,10 +679,23 @@ window.__ModuleLoader__.load({
     }
     function kindFor(current) {
       if (!current) return null;
+      if (['magpie', 'magpie-responses', 'magpie-anthropic'].includes(current.provider)) {
+        const upstream = (current.model || '').split('/')[0];
+        if (upstream === 'codex') return 'codex';
+        if (upstream === 'opencode-go') return 'opencode-go';
+        if (upstream === 'deepseek' || upstream === 'deepseek-ai') return 'deepseek';
+        return null;
+      }
       if (current.provider === 'openai-codex') return 'codex';
       if (current.provider === 'opencode-go') return 'opencode-go';
       if (/deepseek/i.test(current.provider || '') || /^deepseek/i.test(current.model || '')) return 'deepseek';
       return null;
+    }
+    function magpieSourceTitle(value, t) {
+      return value?.source === 'magpie' ? `\n${format(t, 'budget.magpieSource', {
+        time: value.readAt ? resetTime(value.readAt, t) : '—',
+        stale: value.stale ? format(t, 'budget.stale') : '',
+      })}` : '';
     }
     function symbolFor(currency) {
       return currency === 'CNY' ? '¥' : currency === 'USD' ? '$' : currency ? `${currency} ` : '—';
@@ -714,6 +755,7 @@ window.__ModuleLoader__.load({
     }
     function useBudgetQuery(rpc, request, intervalMs) {
       const [state, setState] = React.useState({ data: null, error: false });
+      const settings = useSettings();
       const provider = request?.provider || '';
       const model = request?.model || '';
       React.useEffect(() => {
@@ -742,7 +784,8 @@ window.__ModuleLoader__.load({
           controller?.abort();
           clearInterval(timer);
         };
-      }, [rpc, provider, model, intervalMs]);
+      }, [rpc, provider, model, intervalMs, settings.budgetSource, settings.magpieBaseUrl, settings.magpieApiKeyRef,
+        settings.codexAuthJsonPath, settings.deepseekApiKeyRef, settings.deepseekBaseUrl]);
       return state;
     }
 
@@ -805,7 +848,7 @@ window.__ModuleLoader__.load({
           fiveReset: resetTime(quota?.fiveHour?.resetAt, t),
           weekReset: resetTime(quota?.weekly?.resetAt, t),
           error: failure,
-        });
+        }) + magpieSourceTitle(quota, t);
       } else {
         const deepseek = data?.kind === 'deepseek' ? data.deepseek : null;
         const balance = deepseek?.balance;
@@ -835,8 +878,8 @@ window.__ModuleLoader__.load({
             : '—';
         title = format(t, 'deepseek.title', {
           total: balance?.totalBalance ?? '—',
-          granted: balance?.grantedBalance ?? '—',
-          topped: balance?.toppedUpBalance ?? '—',
+          granted: balance?.grantedBalance || '—',
+          topped: balance?.toppedUpBalance || '—',
           currency: balance?.currency || '—',
           cost: costText,
           peakCost: peakInfo?.text ?? '—',
@@ -851,7 +894,7 @@ window.__ModuleLoader__.load({
           fx: fxLabel(fx, settings, t),
           source: sourceText,
           error: failure,
-        });
+        }) + magpieSourceTitle(deepseek, t);
       }
       return h('span', {
         className: 'dshBudgetView_pill',
@@ -904,7 +947,7 @@ window.__ModuleLoader__.load({
           fiveReset: resetTime(quota?.fiveHour?.resetAt, t),
           weekReset: resetTime(quota?.weekly?.resetAt, t),
           error: failure,
-        });
+        }) + magpieSourceTitle(quota, t);
         titleLines.push(title);
         if (settings.heroStyle === 'chips') {
           quotaChips.push(h('span', {
@@ -936,11 +979,11 @@ window.__ModuleLoader__.load({
         const failure = error ? format(t, 'error.rpc') : deepseek?.error ? format(t, 'error.deepseek', { message: deepseek.error.message || '' }) : '';
         const title = [format(t, 'deepseek.heroTitle', {
           total: balance?.totalBalance ?? '—',
-          granted: balance?.grantedBalance ?? '—',
-          topped: balance?.toppedUpBalance ?? '—',
+          granted: balance?.grantedBalance || '—',
+          topped: balance?.toppedUpBalance || '—',
           currency: balance?.currency || '—',
           error: failure,
-        }), peakTitle].join('\n');
+        }), peakTitle].join('\n') + magpieSourceTitle(deepseek, t);
         titleLines.push(title);
         if (settings.heroStyle === 'chips') {
           deepseekChip = h('span', {
@@ -1142,6 +1185,13 @@ window.__ModuleLoader__.load({
         toggleRow('showHeroPeak', t('settings.heroPeak'), t('settings.heroPeak.desc')),
         toggleRow('showDockPeak', t('settings.dockPeak'), t('settings.dockPeak.desc')),
         h('h4', null, t('settings.connection')),
+        selectRow('budgetSource', t('settings.budgetSource'), t('settings.budgetSource.desc'), [
+          ['auto', t('settings.budgetSource.auto')],
+          ['native', t('settings.budgetSource.native')],
+          ['magpie', t('settings.budgetSource.magpie')],
+        ]),
+        textRow('magpieBaseUrl', t('settings.magpieBase'), t('settings.magpieBase.desc'), 'http://127.0.0.1:3425'),
+        textRow('magpieApiKeyRef', t('settings.magpieRef'), t('settings.magpieRef.desc'), 'MAGPIE_GATEWAY_KEY'),
         textRow('codexAuthJsonPath', t('settings.codexPath'), t('settings.codexPath.desc'), '~/.codex/auth.json'),
         textRow('deepseekApiKeyRef', t('settings.deepseekRef'), null, 'DEEPSEEK_API_KEY'),
         textRow('deepseekBaseUrl', t('settings.deepseekBase'), null, 'https://api.deepseek.com'),

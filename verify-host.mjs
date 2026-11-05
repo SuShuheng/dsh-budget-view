@@ -14,7 +14,7 @@ apply({
   connection: { fetch: { register(route) { handler = route.fetch; } } },
   get(service) {
     if (service === 'codexAuth') return { credential: async () => ({ accessToken: 'test-codex-token' }) };
-    if (service === 'credentials') return { resolve: async () => ({ value: 'test-deepseek-key' }) };
+    if (service === 'credentials') return { resolve: async ref => ref === 'DEEPSEEK_API_KEY' ? { value: 'test-deepseek-key' } : undefined };
   },
 });
 
@@ -55,6 +55,7 @@ globalThis.fetch = async (url, options) => {
 
 try {
   process.env.DSH_HOME = temporaryHome;
+  await rpc({ action: 'settings-set', settings: { budgetSource: 'native', fxMode: 'manual' } });
   delete process.env.OPENCODE_API_KEY;
   assert.equal((await query()).opencodeGo.error.code, 'missing-credentials');
   process.env.OPENCODE_API_KEY = '   ';
@@ -126,7 +127,7 @@ try {
   failure = null;
   changeKey();
   upstream = fixture();
-  const saved = await rpc({ action: 'settings-set', settings: { heroMode: 'opencode-go', fxMode: 'manual' } });
+  const saved = await rpc({ action: 'settings-set', settings: { heroMode: 'opencode-go', budgetSource: 'native', fxMode: 'manual' } });
   assert.equal(saved.settings.heroMode, 'opencode-go');
   assert.equal((await rpc({ action: 'settings-get' })).settings.heroMode, 'opencode-go');
 

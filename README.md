@@ -19,7 +19,9 @@
 - DeepSeek **波峰 / 波谷** 状态
 - 按 DeepSeek 官方人民币峰谷价估算的**本次会话费用**
 
-`0.4.0` 沿用面向 DSH Desktop `0.2.1-rc.2` 的原生 Slot、Projection、主题变量和 RPC 接口。配置对应服务的凭据后即可显示额度或余额；启用 `dsh-context` 后可按请求精确计算 token 与费用。
+`0.5.0` 新增 **Magpie App** 接入：通过 Magpie 网关读取 OpenCode Go 5 小时 / 7 天额度、DeepSeek 余额与 Codex 5 小时 / 7 天额度，同时保留原生查询方式。
+
+`0.5.0` 沿用面向 DSH Desktop `0.2.1-rc.2` 的原生 Slot、Projection、主题变量和 RPC 接口。启动 Magpie 或配置原生服务凭据后即可显示额度或余额；启用 `dsh-context` 后可按请求精确计算 token 与费用。
 
 ## 功能
 
@@ -66,15 +68,47 @@
 | 显示图标 | 开 / 关 | 开 |
 | 新会话页波峰 / 波谷 | 开 / 关 | 开 |
 | 输入栏左侧波峰 / 波谷 | 开 / 关 | 开 |
+| 余额与额度来源 | 自动 / 原生 / Magpie | 自动 |
+| Magpie 网关地址 | URL；留空自动检测 | `MAGPIE_ADDR` → Magpie 设置端口 → `http://127.0.0.1:3425` |
+| Magpie 网关凭据引用 | 凭据键名 | `MAGPIE_GATEWAY_KEY` |
 | Codex auth.json 路径 | 路径文本 | `~/.codex/auth.json` |
 | DeepSeek 凭据引用 | 凭据键名 | `DEEPSEEK_API_KEY` |
 | DeepSeek API 基址 | URL | `https://api.deepseek.com` |
 
 设置保存在 `$DSH_HOME/storages/dsh-budget-view.json`。
 
+### Magpie App
+
+支持 [yetone/magpie](https://github.com/yetone/magpie) 的公开只读用量接口 `GET /v1/magpie/quotas`，响应结构与 `magpie quota --json` 对应，见 [Magpie 源码中的接口与额度定义](https://github.com/yetone/magpie/blob/main/internal/provider/quotas.go)。无需复制 Magpie 内的厂商 API Key 或 Codex OAuth token。
+
+1. 启动 Magpie，确认其用量页能读取对应服务。
+2. 在插件设置中选择“自动”或“Magpie”；默认网关地址可留空。自定义端口会从 `$XDG_CONFIG_HOME/magpie/settings.json`（默认 `~/.config/magpie/settings.json`）读取；便携版或远程网关请手动填写地址，可带 `/v1`。
+3. 输入框与新会话页即可展示额度 / 余额；悬停查看 Magpie 来源、读取时间、缓存标记及重置时间。
+
+来源选择：
+
+- **自动**：优先使用 Magpie 对应服务的卡片；网关不可用或没有该服务时，原生提供商与新会话页汇总回退原生查询。卡片本身报错时保留错误，避免显示另一个账户的数据。
+- **原生**：仅使用原生凭据和接口；Magpie 模型的额度显示不可用。
+- **Magpie**：只读取 Magpie；网关未启动、未配置对应服务或查询失败时显示 `—`。
+- 选中 Magpie 模型时，自动模式只读取 Magpie，不会回退成无关的原生账户。
+
+支持 DSH 中的 `magpie`、`magpie-responses`、`magpie-anthropic` 三条路由，并按模型 ID 的上游前缀识别：
+
+| 模型 ID 示例 | 展示信息 |
+| --- | --- |
+| `opencode-go/deepseek-v4-pro` | OpenCode Go 5h / 7d 剩余额度 |
+| `deepseek/deepseek-v4-pro`、`deepseek-ai/deepseek-v4-pro` | DeepSeek 余额与会话费用估算 |
+| `codex/gpt-5` | Codex 5h / 7d 剩余额度 |
+
+Go 下的 DeepSeek 模型不会显示 DeepSeek 官方账户余额或按官方单价计费；无法确定上游的 `group/...` 路由不显示输入栏预算。
+
+Magpie 有多个同类账户 / Key 时，选择该服务**最近一次经网关服务请求**的卡片；都未使用时取接口中的第一张。不会将多个账户的百分比相加，也不代表路由下一次必定使用该账户。DeepSeek 同时有人民币与美元余额时优先人民币，并在接口提供时显示赠送 / 充值明细。
+
+Host 缓存成功响应最多 30 秒，按网关地址和凭据隔离。本机访问通常无需认证；远程访问须在 Magpie 启用共享，并通过 DSH credentials 服务或环境变量提供网关 Key 引用。凭据与原始账户详情不会返回浏览器；上游错误正文不会透传。
+
 ### OpenCode Go 凭据
 
-在运行 DSH 的环境中设置 `OPENCODE_API_KEY`，然后完全退出并重新启动 DSH，让 Host 进程读取新的环境变量。Windows PowerShell 可持久化为用户环境变量：
+原生查询优先从 DSH credentials 服务解析 `OPENCODE_API_KEY`，再回退进程环境变量。也可以在运行 DSH 的环境中设置 `OPENCODE_API_KEY`，然后完全退出并重新启动 DSH，让 Host 进程读取新的环境变量。Windows PowerShell 可持久化为用户环境变量：
 
 ```powershell
 [Environment]::SetEnvironmentVariable('OPENCODE_API_KEY', '你的 OpenCode API Key', 'User')
@@ -82,7 +116,7 @@
 
 额度由 Host 使用 Bearer 认证查询 `https://opencode.ai/zen/go/v1/usage`。接口来源见 [OpenCode 官方用量接口 PR](https://github.com/anomalyco/opencode/pull/16513)。当前响应的 `usage.rolling` / `usage.weekly` 对应 5 小时 / 7 天窗口，`percent` 是已用百分比；插件显示 `100 - percent`，并兼容旧版 `rollingUsage` / `weeklyUsage` 响应。
 
-- Key 只从 Host 的进程环境读取，不写入插件设置，也不会返回浏览器。
+- Key 只在 Host 从凭据服务或进程环境读取，不写入插件设置，也不会返回浏览器。
 - 使用既有刷新间隔，Host 对成功结果缓存最多 30 秒；更换 Key 会使用独立缓存。
 - `rate-limited` 窗口显示 `0%` 剩余；缺少 Key、认证失败或查询失败时显示 `—`，悬停查看原因。
 - `opencode-go` 下的 DeepSeek 模型显示 Go 订阅额度，不展示 DeepSeek 官方账户余额或会话费用。
@@ -135,37 +169,39 @@ DeepSeek 价格本身为人民币；美元显示按 `CNY 成本 ÷ USD→CNY 汇
 2. 输入 npm 包名：
 
    ```text
-   dsh-budget-view@0.4.0
+   dsh-budget-view@0.5.0
    ```
 
 3. 安装后完全退出并重新打开 DSH。
 4. 在输入框下方和新会话页查看预算信息。
 
-安装源可选择 npm 官方源或镜像源。镜像同步可能延迟，固定版本可使用 `dsh-budget-view@0.4.0`。
+安装源可选择 npm 官方源或镜像源。镜像同步可能延迟，固定版本可使用 `dsh-budget-view@0.5.0`。
 
 ### 使用 dsh 命令
 
 先启动一次 DSH Desktop 完成初始化，再完全退出，在终端运行：
 
 ```powershell
-dsh plugin --profile desktop add dsh-budget-view@0.4.0
+dsh plugin --profile desktop add dsh-budget-view@0.5.0
 ```
 
 安装后重新打开 DSH。
 
 ### 从 Release 或本地包安装
 
-从 [v0.4.0 Release](https://github.com/SuShuheng/dsh-budget-view/releases/tag/v0.4.0) 下载 [dsh-budget-view-0.4.0.tgz](https://github.com/SuShuheng/dsh-budget-view/releases/download/v0.4.0/dsh-budget-view-0.4.0.tgz)，在插件页面选择本地安装。也可以使用版本标签：
+从 [v0.5.0 Release](https://github.com/SuShuheng/dsh-budget-view/releases/tag/v0.5.0) 下载 [dsh-budget-view-0.5.0.tgz](https://github.com/SuShuheng/dsh-budget-view/releases/download/v0.5.0/dsh-budget-view-0.5.0.tgz)，在插件页面选择本地安装。也可以使用版本标签：
 
 ```text
-github:SuShuheng/dsh-budget-view#v0.4.0
+github:SuShuheng/dsh-budget-view#v0.5.0
 ```
 
 本地开发目录可直接添加；安装后同样需要重启 DSH。
 
-### 从 0.3.1 升级
+### 从 0.4.0 或更早版本升级
 
-更新到 `dsh-budget-view@0.4.0`，设置 `OPENCODE_API_KEY` 后完全重启 DSH。既有设置会保留；新会话页原来的“Codex 与 DeepSeek”（`heroMode: "both"`）现在显示全部三项，也可在插件设置中选择“跟随当前模型”或“仅 OpenCode Go”。
+更新到 `dsh-budget-view@0.5.0` 后完全重启 DSH。既有设置会保留，新增的“余额与额度来源”默认为“自动”：优先读取 Magpie，对应服务缺失时回退原生。使用 Magpie 时无需再复制厂商密钥；要保持原生直连，可在插件设置中选择“原生”。原生 OpenCode Go 支持 DSH credentials 服务或 `OPENCODE_API_KEY` 环境变量。
+
+从 `0.3.1` 升级时，新会话页原来的“Codex 与 DeepSeek”（`heroMode: "both"`）显示全部三项，也可选择“跟随当前模型”或“仅 OpenCode Go”。
 
 ## 兼容性与依赖
 
@@ -180,8 +216,9 @@ github:SuShuheng/dsh-budget-view#v0.4.0
 - OpenCode Go：`https://opencode.ai/zen/go/v1/usage`
 - DeepSeek：`https://api.deepseek.com/user/balance`
 - 汇率：`https://api.frankfurter.app/latest?from=USD&to=CNY`
+- Magpie：`http://127.0.0.1:3425/v1/magpie/quotas`（地址可配置）
 
-DeepSeek API Key 通过 DSH credentials 服务读取，Codex 凭据通过 `codexAuth` 服务或本地 `auth.json` 读取，OpenCode Go Key 从 `OPENCODE_API_KEY` 环境变量读取，**不会返回给浏览器**。
+原生模式下，DeepSeek 与 OpenCode Go API Key 通过 DSH credentials 服务或环境变量读取，Codex 凭据通过 `codexAuth` 服务或本地 `auth.json` 读取，**不会返回给浏览器**。Magpie 模式直接读取网关的额度 / 余额报告。
 
 ## 开发与验证
 
@@ -201,6 +238,9 @@ npm test
 - OpenCode Go 的 Host RPC、Bearer 认证、剩余额度换算、新旧响应、缓存与换 Key
 - OpenCode Go 的缺失凭据、认证失败、超时、无效响应及汇总查询隔离
 - OpenCode Go 的输入栏、新会话页显示模式、胶囊 / 纯文本及中英文文案
+- Magpie 三条路由的上游识别、额度 / 余额解析、多账号选择、来源与缓存提示
+- Magpie 汇总查询、网关认证、超时、无效响应、凭据切换及原生回退隔离
+- Magpie DeepSeek 会话计价及 OpenCode Go token 的计价排除
 
 发布前会执行 `prepublishOnly` 的语法检查与测试。
 
@@ -208,6 +248,7 @@ npm test
 
 | 版本 | 内容 |
 | --- | --- |
+| **0.5.0** | 支持 Magpie 的 OpenCode Go / Codex 额度与 DeepSeek 余额；新增来源选择与网关配置；原生 Go 支持凭据服务；修复换账号后的缓存隔离。 |
 | **0.4.0** | 新增 OpenCode Go 5 小时 / 7 天剩余额度；读取 `OPENCODE_API_KEY`；支持输入栏与新会话页显示。 |
 | **0.3.1** | 按国务院 2025–2026 节假日将法定节假日计为波谷；使用 `contextActivity` 按日重算；新增 `cnHolidays`。 |
 | **0.3.0** | 输入栏新增波峰 / 波谷徽标；新会话页改为可配置胶囊；新增样式、密度、图标与徽标设置。 |

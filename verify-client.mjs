@@ -163,3 +163,47 @@ for (const messages of [zh, en]) {
   assert.match(textOf(HeroBudget(props)), /OpenCode Go.*5h —.*7d —/);
 }
 console.log('OpenCode Go client checks passed: provider routing, dock, hero modes, styles, locales, failures');
+
+for (const route of ['magpie', 'magpie-responses', 'magpie-anthropic']) {
+  assert.equal(kindFor({ provider: route, model: 'opencode-go/deepseek-v4-pro' }), 'opencode-go');
+  assert.equal(kindFor({ provider: route, model: 'codex/gpt-5' }), 'codex');
+  assert.equal(kindFor({ provider: route, model: 'deepseek/deepseek-v4-pro' }), 'deepseek');
+  assert.equal(kindFor({ provider: route, model: 'deepseek-ai/deepseek-v4-pro' }), 'deepseek');
+  assert.equal(kindFor({ provider: route, model: 'openrouter/deepseek/deepseek-v4-pro' }), null);
+  assert.equal(kindFor({ provider: route, model: 'group/deepseek' }), null);
+}
+assert.equal(normalizeSettings({ budgetSource: 'magpie', magpieBaseUrl: ' http://localhost:3425/v1 ' }).magpieBaseUrl, 'http://localhost:3425/v1');
+assert.equal(normalizeSettings({ budgetSource: 'invalid' }).budgetSource, 'auto');
+const magpieDays = { '2026-10-08': { cost: {
+  magpie: {
+    'deepseek/deepseek-v4-pro': { peak: bucket },
+    'opencode-go/deepseek-v4-pro': { peak: bucket },
+  },
+} } };
+assert.equal(costFromDays(magpieDays, settings, table).cny, 36.3, 'only direct DeepSeek upstream tokens are charged at its official rates');
+
+for (const messages of [zh, en]) {
+  props.t = (key, vars = {}) => (messages[key] || key).replace(/\{(\w+)\}/g, (_, name) => vars[name] ?? '');
+  for (const [upstream, kind, field] of [['opencode-go', 'opencode-go', 'opencodeGo'], ['codex', 'codex', 'codex'], ['deepseek', 'deepseek', 'deepseek']]) {
+    props.directory = { getSnapshot: () => ({ current: { provider: 'magpie-responses', model: `${upstream}/deepseek-v4-pro` }, status: 'ready' }) };
+    const value = kind === 'deepseek'
+      ? { balance: { currency: 'CNY', totalBalance: '6.45' }, pricing: price, pricingTable: table }
+      : quota;
+    const reading = { ...value, source: 'magpie', readAt: '2026-11-05T12:00:00Z', stale: true };
+    for (const mode of ['both', 'current', kind]) {
+      for (const style of ['chips', 'plain']) {
+        publishSettings({ heroMode: mode, heroStyle: style });
+        budgetState = { data: { kind, [field]: reading }, error: false };
+        const pill = BudgetPill(props);
+        budgetState = { data: { kind: mode === 'both' ? 'summary' : kind, [field]: reading }, error: false };
+        const hero = HeroBudget(props);
+        assert.equal(pill.props['data-budget-kind'], kind);
+        assert.match(pill.props.title, /Magpie/);
+        assert.match(hero.props.title, /Magpie/);
+        assert.match(textOf(pill), kind === 'deepseek' ? /6.45/ : /5h 69%.*7d 95%/);
+        assert.match(textOf(hero), kind === 'deepseek' ? /6.45/ : /5h 69%.*7d 95%/);
+      }
+    }
+  }
+}
+console.log('Magpie client checks passed: upstream routing, quota and balance UI, source labels, pricing isolation, locales');
